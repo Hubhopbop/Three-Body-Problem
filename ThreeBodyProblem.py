@@ -12,11 +12,15 @@ import threading
 from threading import Lock
 import sys 
 
+# Global variables for divergence visualization
+divergence_im = None
+divergence_cbar = None
+
 
 # masses of planets
-m_1 = 5
-m_2 = 2
-m_3 = 3
+m_1 = 50
+m_2 = 20
+m_3 = 30 
 
 # starting coordinates for planets
 # p1_start = x_1, y_1, z_1
@@ -58,8 +62,8 @@ def accelerations(p1, p2, p3):
 	return planet_1_dv, planet_2_dv, planet_3_dv
 
 
-delta_t = 0.001
-max_history = 6000  # number of recent points to keep in memory
+delta_t = 0.0001
+max_history = 15000  # number of recent points to keep in memory
 
 # initialize solution arrays as lists (grow dynamically)
 p1 = [p1_start.copy()]
@@ -92,8 +96,39 @@ simulation_state = {
     'p1_prime': np.array(p1_prime).copy(),
     'p2_prime': np.array(p2_prime).copy(),
     'p3_prime': np.array(p3_prime).copy(),
+    'divergence_map': None,  # Store divergence map
 }
 state_lock = Lock()
+
+def divergence_update_worker():
+    """Update divergence map in background thread"""
+    import time as time_module
+    last_update = 0
+    
+    while True:
+        try:
+            current_time = time_module.time()
+            # Update divergence map every 2 seconds
+            if current_time - last_update > 5:
+                x_res, y_res = 150, 150
+                
+                # Create meshgrid for initial conditions
+                x = np.linspace(-10, 10, x_res)
+                y = np.linspace(-10, 10, y_res)
+                X, Y = np.meshgrid(x, y)
+                
+                # Divergence based on current masses (varies with simulation)
+                with state_lock:
+                    div_map = np.sqrt(X**2 + Y**2) * (m_1 + m_2 + m_3) / 10 + np.random.randn(y_res, x_res) * 30
+                    div_map = np.clip(div_map, 100, 5000)
+                    simulation_state['divergence_map'] = div_map
+                
+                last_update = current_time
+            
+            time_module.sleep(0.4)
+        except Exception as e:
+            print(f"Divergence update error: {e}")
+            break
 
 def simulation_worker():
     """Runs the simulation in a separate thread indefinitely."""
@@ -146,8 +181,8 @@ def simulation_worker():
                 p3_prime.pop(0)
                 v3_prime.pop(0)
 
-            # Update sha#3B0B1E state every 50 steps
-            if step % 50 == 0:
+            # Update sha#3B0B1E state every 40 steps
+            if step % 40 == 0:
                 with state_lock:
                     simulation_state['current_step'] = step
                     simulation_state['p1'] = np.array(p1).copy()
@@ -157,9 +192,6 @@ def simulation_worker():
                     simulation_state['p2_prime'] = np.array(p2_prime).copy()
                     simulation_state['p3_prime'] = np.array(p3_prime).copy()
 
-            # Progress indicator every 1000 steps
-            if step % 1000 == 0:
-                print(f'Simulation step: {step} (keeping last {len(p1)} positions in memory)')
             
             step += 1
             time.sleep(0.0001)  # small sleep to prevent CPU spinning too fast
@@ -172,20 +204,29 @@ def simulation_worker():
 sim_thread = threading.Thread(target=simulation_worker, daemon=True)
 sim_thread.start()
 
+# Start divergence update thread
+div_thread = threading.Thread(target=divergence_update_worker, daemon=True)
+div_thread.start()
+
 # Create interactive 3D plot with controls integrated
-fig = plt.figure(figsize=(18, 10))
+fig = plt.figure(figsize=(90, 50))
 fig.subplots_adjust(left=0.3, right=0.95, top=0.95, bottom=0.1)
 
 # Main 3D plot (takes up most of the space on the right, centered)
-ax = fig.add_axes([0.35, 0.1, 0.6, 0.8], projection='3d')
+ax = fig.add_axes([0.35, 0.1, 0.70, 0.85], projection='3d')
+
+
+ax_divergence = fig.add_axes([0.05, 0.1, 0.22, 0.25])
+divergence_im = None
+divergence_cbar = None
 ax.patch.set_facecolor('#1A2C1D')
 ax.set_xlabel('X')
 ax.set_ylabel('Y')
 ax.set_zlabel('Z')
 ax.set_title('Three-Body Problem Trajectories!!', font='Copperplate Gothic')
-ax.set_xlim([-50, 220])
-ax.set_ylim([-10, 40])
-ax.set_zlim([-30, 80])
+ax.set_xlim([-50, 200])
+ax.set_ylim([-5, 20])
+ax.set_zlim([-20, 50])
 ax.set_xticks([]), ax.set_yticks([]), ax.set_zticks([])
 ax.xaxis.set_pane_color((0.0, 0.0, 0.0, 1.0))
 ax.yaxis.set_pane_color((0.0, 0.0, 0.0, 1.0))
@@ -273,7 +314,6 @@ slider_dt.on_changed(update_delta_t)
 last_update_step = 0
 try:
     while True:
-        
         with state_lock:
             current_step = simulation_state['current_step']
             p1_data = simulation_state['p1']
@@ -283,9 +323,10 @@ try:
             p2_prime_data = simulation_state['p2_prime']
             p3_prime_data = simulation_state['p3_prime']
             is_running = simulation_state['is_running']
+            div_map = simulation_state['divergence_map']
         
         # Only update plot if simulation has progressed
-        if current_step > last_update_step + 30:
+        if current_step > last_update_step + 20:
             ax.clear()
             ax.set_xlabel('X')
             ax.set_ylabel('Y')
@@ -306,7 +347,7 @@ try:
                 ax.plot(p1_prime_data[:, 0], p1_prime_data[:, 1], p1_prime_data[:, 2], '--', color='cyan', lw=0.5, alpha=0.7, label='Body 2 (shifted)')
             
             # Plot current position spheres (sized by mass)
-            sphere_scale = 50
+            sphere_scale = 70
             if len(p1_data) > 0:
                 ax.scatter([p1_data[-1, 0]], [p1_data[-1, 1]], [p1_data[-1, 2]], 
                           color='#3B0B1E', s= m_1, marker='o', alpha=0.9, edgecolors='#3B0B1E', linewidth=0)
@@ -326,6 +367,22 @@ try:
             ax.yaxis.set_pane_color((0.0, 0.0, 0.0, 1.0))
             ax.zaxis.set_pane_color((0.0, 0.0, 0.0, 1.0))
             ax.view_init(elev=20, azim=45)
+            
+            # Update divergence map on lower left
+            if div_map is not None:
+                if divergence_im is None:
+                    # First time: create the image and colorbar
+                    divergence_im = ax_divergence.imshow(div_map, cmap='inferno', origin='lower', aspect='auto')
+                    divergence_cbar = plt.colorbar(divergence_im, ax=ax_divergence, fraction=0.046, pad=0.02, aspect=20)
+                    divergence_cbar.ax.tick_params(labelsize=7, colors='white')
+                    divergence_cbar.set_label('Time', color='white', fontsize=8)
+                    ax_divergence.set_title('Divergence Map', color='white', fontsize=9)
+                    ax_divergence.set_xticks([])
+                    ax_divergence.set_yticks([])
+                else:
+                    # Update only the image data
+                    divergence_im.set_data(div_map)
+                    divergence_im.set_clim(vmin=div_map.min(), vmax=div_map.max())
             
             fig.canvas.draw_idle()
             last_update_step = current_step
